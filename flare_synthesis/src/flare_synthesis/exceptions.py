@@ -1,0 +1,2 @@
+class FlareSynthesisError(Exception):
+    pass

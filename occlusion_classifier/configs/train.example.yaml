@@ -1,0 +1,33 @@
+# Раскладка данных: <data_root>/<Класс>/{train,test}/
+# Clean лежит отдельно — у него подтверждён нулевой вектор меток.
+data_root: /kaggle/input/occlusions/Datasets
+clean_train_dir: /kaggle/input/clean-dataset/clean/train
+clean_test_dir: /kaggle/input/clean-dataset/clean/test
+
+# Чекпойнт сегментационной модели, из которого забирается энкодер
+encoder_checkpoint: /kaggle/input/fpn18/fpn_resnet18/fpn_resnet18.ckpt
+arch: FPN
+encoder_name: resnet18
+freeze_encoder: false
+
+output_dir: /kaggle/working/bundle
+inference_dir: /kaggle/input/inference   # кадры для трекинга предсказаний по эпохам, можно убрать
+
+classes:
+  - DaytimeFlare
+  - Fog
+  - MotionBlur
+  - NighttimeFlare
+  - Raindrops
+  - Soil
+
+epochs: 30
+batch_size: 32
+encoder_lr: 1.0e-5
+head_lr: 1.0e-4
+max_per_class: 800
+threshold: 0.5
+device: auto
+
+project_name: OcclusionNet
+task_name: FPN_resnet18_multilabel

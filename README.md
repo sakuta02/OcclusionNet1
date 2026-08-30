@@ -1,90 +1,85 @@
 # OcclusionNet
 
-Модель для выявления и классификации окклюзий на кадрах с автомобильных камер.
+Выявление и классификация окклюзий на кадрах с автомобильных камер плюс оценка
+того, насколько сильно кадр испорчен.
 
-Цель — классифицировать тип загрязнения/помехи на изображении и оценить степень
-загрязнённости кадра. Задача multilabel: на одном кадре может быть несколько
-окклюзий одновременно, чистый кадр — это нулевой вектор меток.
-
-**Классы:** `DaytimeFlare`, `Fog`, `MotionBlur`, `NighttimeFlare`, `Raindrops`,
-`Reflections`, `Soil`. Плюс `Clean` — отсутствие всех семи.
+Задача multilabel: на кадре может быть несколько окклюзий сразу, у чистого кадра
+вектор меток нулевой. Классы: `DaytimeFlare`, `Fog`, `MotionBlur`,
+`NighttimeFlare`, `Raindrops`, `Reflections`, `Soil`. Отдельно `Clean`,
+отсутствие всех семи.
 
 ## Структура
 
 | Папка | Что внутри |
 |---|---|
-| `training/` | `occlusionnet.ipynb` — обучение модели |
-| `validation/` | `testclassifier.ipynb` — прогон обученных весов на отложенной выборке |
-| `occlusion_score/` | оценка степени загрязнённости через расхождение двух SegFormer'ов |
-| `data/` | описание датасетов, манифесты, заливка Google Drive → Kaggle |
-| `infra/` | ClearML-сервер в Yandex Cloud (OpenTofu), см. [infra/README.md](infra/README.md) |
+| `training/` | `occlusionnet.ipynb`, обучение основной модели |
+| `validation/` | `testclassifier.ipynb`, прогон весов на отложенной выборке |
+| `occlusion_classifier/` | классификатор поверх энкодера сегментационной модели |
+| `occlusion_score/` | оценка степени загрязнённости кадра |
+| `flare_synthesis/` | генерация синтетических кадров с бликами |
+| `data/` | описание датасетов, заливка Google Drive в Kaggle |
+| `infra/` | ClearML-сервер в Yandex Cloud, см. [infra/README.md](infra/README.md) |
 
-## Модель
-
-EfficientNet-B3 (ImageNet-веса) в качестве backbone, классификатор заменён на
-`Identity`, поверх — семь независимых MLP-голов (`Linear → LayerNorm → GELU →
-Dropout → Linear(1)`), по одной на класс. Логиты конкатенируются в вектор длины 7,
-лосс — `BCEWithLogitsLoss`.
-
-Обучение: AdamW с разными lr для backbone (`1e-5`) и голов (`2e-4`), weight decay
-`1e-3`, 3 эпохи линейного warmup → cosine annealing до `1e-6`, всего 20 эпох,
-batch 16, mixed precision. Лучший чекпойнт выбирается по macro F1 на тесте.
+Три пакета устроены одинаково: код в `src/<пакет>/`, CLI в `scripts/`,
+зависимости в `pyproject.toml`, исходные ноутбуки в `notebooks/`.
 
 ## Данные
-
-Ссылки и подробности предобработки — в [data/occlusions_datasets.md](data/occlusions_datasets.md).
 
 * Kaggle: https://www.kaggle.com/datasets/mishasavinov/occlusion-dataset
 * Google Drive: [папка с датасетами](https://drive.google.com/drive/folders/1P81qiLkSbpOT2rNEV-64RXUGqdlRCUep)
 
-Раскладка — `Datasets/<Класс>/<Источник>/{train,test}/`, кадры 512×512.
-Папка `Clean/` разбирается отдельным датасетом и даёт нулевые таргеты.
+Раскладка: `Datasets/<Класс>/<Источник>/{train,test}/`, кадры 512×512. Папка
+`Clean/` подключается отдельным датасетом. Подробности в
+[data/occlusions_datasets.md](data/occlusions_datasets.md).
 
-Залить датасет с Drive на Kaggle (запускается в Colab, рядом нужен `config.env`
-с `KAGGLE_USERNAME` / `KAGGLE_API_TOKEN` и `DRIVE_SOURCE_PATH`):
+## Запуск
+
+Всё считается на Kaggle, Colab или DataSphere, в облаке живёт только ClearML.
+Ключи нигде в репозитории не хранятся, они берутся из переменных окружения
+`CLEARML_API_HOST`, `CLEARML_API_ACCESS_KEY`, `CLEARML_API_SECRET_KEY`.
+
+**Основная модель.** EfficientNet-B3 и семь независимых MLP-голов,
+`BCEWithLogitsLoss`, 20 эпох. Обучение в `training/occlusionnet.ipynb`, оно же
+подбирает пороги по классам и складывает веса в артефакты задачи. Проверка на
+отложенной выборке в `validation/testclassifier.ipynb`, нужно указать
+`TRAIN_TASK_ID`.
+
+**Классификатор на сегментационном энкодере.** Вторая ветка эксперимента: энкодер
+обученной FPN с ResNet-18, поверх по обучаемому query на класс с кросс-аттеншеном
+к карте признаков, лосс focal BCE. В примере конфига шесть классов, `Reflections`
+отключён из-за нехватки данных.
 
 ```bash
-python data/gdrive_to_kaggle_data_uploader.py
+cp occlusion_classifier/configs/train.example.yaml my.yaml   # правим пути
+python occlusion_classifier/scripts/train.py --config my.yaml
+python occlusion_classifier/scripts/predict.py <bundle_dir> <папка_с_кадрами>
 ```
 
-## Как запускать
+**Генерация бликов.** Блик из FlareX накладывается на фоновый кадр вождения со
+случайной гаммой, шумом, аффинным преобразованием и блюром.
 
-Всё считается в ноутбуках снаружи облака — Kaggle, Colab или DataSphere.
-В облаке живёт только ClearML для трекинга экспериментов.
+```bash
+python flare_synthesis/scripts/generate.py \
+  --background-dir <кадры_вождения> \
+  --flare-dir <FlareX/Flare2D/input> --light-dir <FlareX/Flare2D/gt> \
+  --output-dir ./flare_generated -n 1000 --crop-size 512 --archive
+```
 
-### 1. Обучение — `training/occlusionnet.ipynb`
+**Степень загрязнённости.** Основной вариант обучения не требует: кадр
+сегментируется тяжёлой (`segformer-b5`) и лёгкой (`segformer-b0`) моделями,
+разница их уверенности усредняется по пикселям. Ноутбук и результаты лежат
+в `occlusion_score/diff_model_conf/`. Обучаемый вариант дистиллирует признаки
+DINOv2 в MobileNetV3 и предсказывает разметку людей:
 
-1. Подключите датасеты и проверьте пути в ячейке с `DATA_PATH` и `CLEAN_*_PATH`.
-2. Заполните пустые `%env CLEARML_*` во второй ячейке своими ключами
-   (Kaggle — **Add-ons → Secrets**, Colab — панель ключей слева; ключи создаются
-   в ClearML: **Settings → Workspace → Create new credentials**).
-3. Выполните ноутбук целиком.
-
-По ходу в ClearML уходят loss, per-class и macro precision/recall/F1, learning
-rate и норма градиентов. В конце подбираются пороги по каждому классу (перебор
-0.1…0.9 с шагом 0.02 по F1) и в артефакты задачи загружаются:
-
-`best_weights`, `best_thresholds_json`, `best_metrics_json`,
-`metrics_csv_0.5`, `metrics_csv_tuned`.
-
-### 2. Валидация — `validation/testclassifier.ipynb`
-
-Пропишите `TRAIN_TASK_ID` — id задачи обучения в ClearML, веса и пороги
-подтянутся из её артефактов автоматически. Проверьте `VAL_ROOT` (папка
-`val_samples/<Класс>/`). Ноутбук считает метрики при пороге 0.5, при сохранённых
-и при заново подобранных порогах, печатает размер модели и рисует предсказания
-на отдельных кадрах.
-
-### 3. Степень загрязнённости — `occlusion_score/diff_model_conf/`
-
-Скор без обучения: один и тот же кадр сегментируется тяжёлой (`segformer-b5`) и
-лёгкой (`segformer-b0`) моделями Cityscapes, разница их уверенности усредняется
-по пикселям. Чем сильнее расходятся модели, тем грязнее кадр. Считаются два
-варианта — разница индивидуальных максимумов и разница на классе, выбранном B5;
-формулы в первой ячейке ноутбука. Результат — `occlusion_scores.csv`.
+```bash
+python occlusion_score/scripts/train.py --config <config.yaml>
+python occlusion_score/scripts/predict.py <bundle_dir> <папка_с_кадрами>
+```
 
 ## Зависимости
 
 `torch`, `torchvision`, `clearml`, `scikit-learn`, `pandas`, `numpy`, `pillow`,
-`tqdm`, `matplotlib`, `seaborn`; для скора дополнительно `transformers`.
-На Kaggle/Colab всё, кроме `clearml`, уже стоит — его ставит первая ячейка.
+`tqdm`, `matplotlib`, `seaborn`, плюс `transformers` для скора
+и `segmentation_models_pytorch` для классификатора. На Kaggle и Colab стоит всё,
+кроме `clearml` и `segmentation_models_pytorch`. Версии в `pyproject.toml`
+соответствующего пакета.
